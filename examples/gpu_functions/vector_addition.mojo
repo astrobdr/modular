@@ -11,7 +11,7 @@
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
 
-from gpu import thread_idx
+from gpu import thread_idx, block_idx, block_dim
 from gpu.host import DeviceContext
 from layout import Layout, LayoutTensor
 from math import ceildiv
@@ -19,6 +19,7 @@ from sys import has_nvidia_gpu_accelerator, has_amd_gpu_accelerator
 
 alias float_dtype = DType.float32
 alias VECTOR_WIDTH = 10
+alias BLOCK_SIZE = 5
 alias layout = Layout.row_major(VECTOR_WIDTH)
 
 
@@ -29,42 +30,49 @@ def main():
     ]()
 
     # Get context for the attached GPU
-    var ctx = DeviceContext()
+    ctx = DeviceContext()
 
     # Allocate data on the GPU address space
-    var lhs_buffer = ctx.enqueue_create_buffer[float_dtype](VECTOR_WIDTH)
-    var rhs_buffer = ctx.enqueue_create_buffer[float_dtype](VECTOR_WIDTH)
-    var out_buffer = ctx.enqueue_create_buffer[float_dtype](VECTOR_WIDTH)
+    lhs_buffer = ctx.enqueue_create_buffer[float_dtype](VECTOR_WIDTH)
+    rhs_buffer = ctx.enqueue_create_buffer[float_dtype](VECTOR_WIDTH)
+    out_buffer = ctx.enqueue_create_buffer[float_dtype](VECTOR_WIDTH)
 
     # Fill in values across the entire width
     _ = lhs_buffer.enqueue_fill(1.25)
     _ = rhs_buffer.enqueue_fill(2.5)
 
     # Wrap the device buffers in tensors
-    var lhs_tensor = LayoutTensor[float_dtype, layout](lhs_buffer)
-    var rhs_tensor = LayoutTensor[float_dtype, layout](rhs_buffer)
-    var out_tensor = LayoutTensor[float_dtype, layout](out_buffer)
+    lhs_tensor = LayoutTensor[float_dtype, layout](lhs_buffer)
+    rhs_tensor = LayoutTensor[float_dtype, layout](rhs_buffer)
+    out_tensor = LayoutTensor[float_dtype, layout](out_buffer)
+
+    # Calculate the number of blocks needed to cover the vector
+    grid_dim = ceildiv(VECTOR_WIDTH, BLOCK_SIZE)
+    print("Grid dim:", grid_dim)
 
     # Launch the vector_addition function as a GPU kernel
     ctx.enqueue_function[vector_addition](
         lhs_tensor,
         rhs_tensor,
         out_tensor,
-        grid_dim=1,
-        block_dim=VECTOR_WIDTH,
+        VECTOR_WIDTH,
+        grid_dim=grid_dim,
+        block_dim=BLOCK_SIZE,
     )
 
     # Map to host so that values can be printed from the CPU
     with out_buffer.map_to_host() as host_buffer:
-        var host_tensor = LayoutTensor[float_dtype, layout](host_buffer)
+        host_tensor = LayoutTensor[float_dtype, layout](host_buffer)
         print("Resulting vector:", host_tensor)
 
 
 fn vector_addition(
-    lhs_tensor: LayoutTensor[float_dtype, layout, MutableAnyOrigin],
-    rhs_tensor: LayoutTensor[float_dtype, layout, MutableAnyOrigin],
-    out_tensor: LayoutTensor[float_dtype, layout, MutableAnyOrigin],
+    lhs_tensor: LayoutTensor[mut=True, float_dtype, layout],
+    rhs_tensor: LayoutTensor[mut=True, float_dtype, layout],
+    out_tensor: LayoutTensor[mut=True, float_dtype, layout],
+    size: Int,
 ):
     """The calculation to perform across the vector on the GPU."""
-    var tid = thread_idx.x
-    out_tensor[tid] = lhs_tensor[tid] + rhs_tensor[tid]
+    global_tid = block_idx.x * block_dim.x + thread_idx.x
+    if global_tid < size:
+        out_tensor[global_tid] = lhs_tensor[global_tid] + rhs_tensor[global_tid]
